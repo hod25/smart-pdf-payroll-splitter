@@ -1,33 +1,39 @@
 # SmartSplit — Universal PDF Splitter 🤖✂️
 
-אפליקציית ווב (Streamlit) לפיצול קובץ PDF מרובה-עמודים (תלושים, חשבוניות,
-מסמכים) לקבצים נפרדים — עם זיהוי שם אוטומטי לפי **שדה עוגן מותאם אישית**,
-תיקון ידני, והורדה פרטנית או כ-ZIP.
+A Streamlit web app for splitting a multi-page PDF (payslips, invoices, documents)
+into separate files — with automatic name detection based on a **custom anchor
+field**, manual correction, and per-page or ZIP download.
 
-## תכונות עיקריות
+## Key Features
 
-- **פיצול גנרי לפי שדה עוגן** — המשתמש מזין מילת מפתח (ברירת מחדל `מחלקה`),
-  והשם מחולץ מהטקסט שמימין לה — כך שניתן לפצל לא רק תלושים אלא גם חשבוניות ומסמכים.
-- **זיהוי שם חכם** — חילוץ מבוסס-קואורדינטות שמאתר את השם מימין לשדה העוגן,
-  כולל תיקון קידוד גופן (`ð` ← `נ`).
-- **רשימה שטוחה ואינטראקטיבית** — לכל עמוד תיבת בחירה (עם הניחוש מסומן מראש)
-  וכפתור הורדה פרטני — אידאלי למובייל.
-- **דו-לשוני (עברית/אנגלית)** — כפתור החלפת שפה קומפקטי עם כיוון RTL/LTR דינמי.
-- **מותאם למובייל** — עיצוב רספונסיבי, כפתורים גדולים, והסתרת רכיבי ברירת המחדל של Streamlit.
-- **פרטיות מלאה** — כל העיבוד בזיכרון בלבד (`io.BytesIO`); שום קובץ לא נשמר על השרת.
-- **הורדה כ-ZIP** — כל הדפים המפוצלים נארזים לקובץ ZIP יחיד, עם הגנה מפני שמות כפולים.
-- **שמות קבצים** — בפורמט `{תאריך} {שם}.pdf`, כשהתאריך נלקח משם הקובץ המקורי.
+- **Generic anchor-based splitting** — the user enters a keyword (default `מחלקה`
+  / "department"), and the name is extracted from the text to its right — so you
+  can split not only payslips but also invoices and documents.
+- **Smart name detection** — coordinate-based extraction that locates the name to
+  the right of the anchor field, including a font-encoding fix (`ð` → `נ`).
+- **Flat interactive list** — each page has a dropdown (with the guess pre-selected)
+  and an individual download button — ideal for mobile.
+- **Bilingual (Hebrew / English)** — a compact language-toggle button with dynamic
+  RTL/LTR direction.
+- **Mobile-friendly** — responsive design, large buttons, and hidden default
+  Streamlit chrome.
+- **Fully private** — all processing happens in memory (`io.BytesIO`); no file is
+  ever stored on the server.
+- **ZIP download** — all split pages are bundled into a single ZIP, with
+  duplicate-filename protection.
+- **Filenames** — in the format `{date} {name}.pdf`, where the date is taken from
+  the original file name.
 
-## הפעלה מקומית
+## Run Locally
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-האפליקציה תיפתח בדפדפן בכתובת http://localhost:8501.
+The app opens in your browser at http://localhost:8501.
 
-## פריסה ב-Render (Web Service)
+## Deploy on Render (Web Service)
 
 - **Build Command:**
   ```bash
@@ -38,16 +44,17 @@ streamlit run app.py
   streamlit run app.py --server.port $PORT --server.address 0.0.0.0
   ```
 
-## מבנה הפרויקט
+## Project Structure
 
-| קובץ | תיאור |
+| File | Description |
 | --- | --- |
-| `app.py` | אפליקציית ה-Streamlit |
-| `requirements.txt` | תלויות: `streamlit`, `pypdf` |
-| `render.yaml` | הגדרת פריסה אוטומטית ל-Render (Blueprint) |
-| `.gitignore` | מונע העלאת קבצי זבל ומסמכים (`*.pdf`, `*.zip`, `*.xlsx`) |
+| `app.py` | The Streamlit application |
+| `requirements.txt` | Dependencies: `streamlit`, `pypdf` |
+| `render.yaml` | Automatic Render deployment config (Blueprint) |
+| `.gitignore` | Prevents committing junk and documents (`*.pdf`, `*.zip`, `*.xlsx`) |
 
-## אבטחת מידע
+## Data Security
 
-מכיוון שהכלי מעבד מסמכים רגישים (תלושים, חשבוניות), האפליקציה לא שומרת אף
-קובץ על השרת — כל הקבצים מעובדים בזיכרון RAM בלבד ונמחקים בסיום הבקשה.
+Because the tool processes sensitive documents (payslips, invoices), the app never
+stores any file on the server — all files are processed in RAM only and are
+discarded when the request ends.
