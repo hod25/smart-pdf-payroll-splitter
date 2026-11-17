@@ -1,5 +1,9 @@
 import streamlit as st
+import base64
+import hashlib
+import html
 import io
+import json
 import zipfile
 import re
 from pypdf import PdfReader, PdfWriter
@@ -46,6 +50,15 @@ TRANSLATIONS = {
         "zip_button": "🚀 צור קובץ ZIP מפוצל",
         "zip_ready": "קובץ ה-ZIP מוכן להורדה!",
         "zip_download": "📥 הורד קובץ ZIP",
+        "analyzing": "מנתח את הקובץ...",
+        "share": "שתף",
+        "share_tooltip": "שיתוף ישיר לוואטסאפ / מייל / כל אפליקציה, בלי להוריד",
+        "share_unsupported": "הדפדפן הזה לא תומך בשיתוף קבצים. השתמשו ב'הורדה' (בטלפון: Chrome באנדרואיד או Safari באייפון).",
+        "share_blocked": "הדפדפן חסם את השיתוף. נסו ללחוץ שוב, או השתמשו ב'הורדה'.",
+        "share_error": "השיתוף נכשל. השתמשו ב'הורדה'.",
+        "share_missing": "הקובץ לא נטען בדפדפן. רעננו את הדף ונסו שוב.",
+        "merged_pages": "📎 מאוחד: עמודים {pages}",
+        "merged_with": "↳ מאוחד עם עמוד {n}",
     },
     "en": {
         "lang_label": "🌐 שפה / Language",
@@ -66,6 +79,15 @@ TRANSLATIONS = {
         "zip_button": "🚀 Generate split ZIP file",
         "zip_ready": "The ZIP file is ready to download!",
         "zip_download": "📥 Download ZIP file",
+        "analyzing": "Analyzing the file...",
+        "share": "Share",
+        "share_tooltip": "Share directly to WhatsApp / email / any app, no download needed",
+        "share_unsupported": "This browser can't share files. Use 'Download' instead (on phones: Chrome on Android or Safari on iPhone).",
+        "share_blocked": "The browser blocked sharing. Tap again, or use 'Download'.",
+        "share_error": "Sharing failed. Use 'Download' instead.",
+        "share_missing": "The file isn't loaded in the browser. Refresh the page and try again.",
+        "merged_pages": "📎 Merged: pages {pages}",
+        "merged_with": "↳ Merged with page {n}",
     },
 }
 
@@ -160,6 +182,11 @@ anchor_field = st.text_input(T["anchor_label"], value="מחלקה", help=T["anch
 
 uploaded_file = st.file_uploader(T["uploader"], type=["pdf"])
 
+
+
+# ---------------------------------------------------------------------------
+# ניתוח העמודים / Page analysis
+# ---------------------------------------------------------------------------
 def analyze_page(page, anchor):
     """ניתוח עמוד על בסיס קואורדינטות פיזיות.
 
@@ -208,113 +235,231 @@ def analyze_page(page, anchor):
     return guessed_name, clean_lines
 
 
-def sanitize_name(name, page_num):
-    """ניקוי שם לשימוש בשם קובץ, עם נפילה לשם עמוד אם ריק."""
-    clean = "".join(x for x in name if x.isalnum() or x in " -_")
-    clean = clean[:50].strip()
-    if not clean:
-        clean = f"page_{page_num + 1}"
-    return clean
+# המטמון מזוהה לפי hash התוכן (פרמטרים שמתחילים ב-_ לא נכנסים למפתח המטמון).
+# The cache is keyed by the content hash; "_" params are excluded from the key.
+# ttl קצר: התלושים נשמרים בזיכרון השרת רק לזמן קצר.
+@st.cache_data(ttl=900, max_entries=20, show_spinner=False)
+def analyze_pdf(file_hash, anchor, _file_bytes):
+    reader = PdfReader(io.BytesIO(_file_bytes))
+    return [analyze_page(page, anchor) for page in reader.pages]
 
 
-def build_page_pdf(page):
-    """יצירת PDF של עמוד בודד בזיכרון (io.BytesIO) והחזרת ה-bytes."""
+@st.cache_data(ttl=900, max_entries=500, show_spinner=False)
+def build_pdf(file_hash, page_indices, _file_bytes):
+    """PDF של עמוד אחד או כמה עמודים (עובד עם כמה עמודים מאוחד לקובץ אחד)."""
+    reader = PdfReader(io.BytesIO(_file_bytes))
     writer = PdfWriter()
-    writer.add_page(page)
+    for i in page_indices:
+        writer.add_page(reader.pages[i])
     buffer = io.BytesIO()
     writer.write(buffer)
     return buffer.getvalue()
 
+
+@st.cache_data(ttl=900, max_entries=20, show_spinner=False)
+def build_zip(file_hash, groups, _file_bytes):
+    """groups: tuple של (שם קובץ, tuple של אינדקסי עמודים)."""
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for filename, pages in groups:
+            zf.writestr(filename, build_pdf(file_hash, pages, _file_bytes))
+    return zip_buffer.getvalue()
+
+
+# תווים שאסורים בשמות קבצים ב-Windows/macOS/Linux, כולל תווי בקרה
+_FORBIDDEN_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL",
+                     *(f"COM{i}" for i in range(1, 10)),
+                     *(f"LPT{i}" for i in range(1, 10))}
+
+
+def sanitize_name(name, page_num):
+    """מסיר רק תווים אסורים במערכת הקבצים; שומר על גרש (ג'ורג'), נקודות וכו'."""
+    clean = _FORBIDDEN_CHARS.sub(" ", str(name or ""))
+    clean = re.sub(r"\s+", " ", clean).strip()[:80]
+    clean = clean.strip(" .")  # Windows לא מרשה נקודה/רווח בסוף השם
+    if clean.upper() in _WINDOWS_RESERVED:
+        clean += "_"
+    return clean or f"page_{page_num + 1}"
+
+
+# ---------------------------------------------------------------------------
+# כפתור שיתוף (Web Share API) / Share button
+# רץ ישירות בדף (st.html, בלי iframe): ל-iframe של components.html אין
+# הרשאת web-share, ולכן navigator.share עלול להיחסם שם.
+# ---------------------------------------------------------------------------
+_SHARE_CSS = """
+<style>
+.ss-share { width:100%; padding:0.7rem 0.5rem; font-size:1.05rem; border-radius:10px;
+  border:1px solid #1da851; background:#25D366; color:#fff; cursor:pointer;
+  font-family:inherit; line-height:1.6; }
+.ss-share:hover { background:#1ebe5b; }
+.ss-share.ss-unsup { background:transparent; color:inherit; border-color:rgba(128,128,128,.45); opacity:.7; }
+.ss-share-msg { font-size:0.8rem; margin-top:4px; color:#c0392b; }
+.ss-share-msg:empty { display:none; }
+@media (max-width:640px) { .ss-share { padding:0.6rem 0.5rem; font-size:0.95rem; } }
+</style>
+"""
+
+_SHARE_JS = """
+<script>
+(function () {
+  var W = window;
+  W.__ssFiles = W.__ssFiles || {};
+  var REC = __REC__;
+  if (REC) { W.__ssFiles[REC.key] = REC; }
+  W.__ssMsgs = __MSGS__;
+
+  function canShareFiles() {
+    try {
+      var f = new File([new Uint8Array([37])], "t.pdf", {type: "application/pdf"});
+      return !!(navigator.share && navigator.canShare && navigator.canShare({files: [f]}));
+    } catch (e) { return false; }
+  }
+  // סימון מראש של כפתורים בדפדפן שלא תומך (טולטיפ ברור)
+  setTimeout(function () {
+    if (canShareFiles()) return;
+    document.querySelectorAll(".ss-share").forEach(function (b) {
+      b.classList.add("ss-unsup");
+      b.title = W.__ssMsgs.unsupported;
+    });
+  }, 0);
+
+  if (W.__ssInit) return;
+  W.__ssInit = true;
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target && ev.target.closest && ev.target.closest(".ss-share");
+    if (!btn) return;
+    ev.preventDefault();
+    var M = W.__ssMsgs;
+    var msgEl = btn.parentElement && btn.parentElement.querySelector(".ss-share-msg");
+    function say(t) { if (msgEl) msgEl.textContent = t; }
+    say("");
+    var rec = W.__ssFiles[btn.getAttribute("data-file-key")];
+    if (!rec) { say(M.missing); return; }
+    if (!rec.file) {
+      // המרה סינכרונית (בתוך הלחיצה) כדי לא לאבד את "מחוות המשתמש"
+      var bin = atob(rec.b64), arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      rec.file = new File([arr], rec.name, {type: "application/pdf"});
+    }
+    var data = {files: [rec.file], title: rec.name};
+    if (!navigator.share || !navigator.canShare || !navigator.canShare(data)) {
+      say(M.unsupported); return;
+    }
+    navigator.share(data).catch(function (err) {
+      var n = err && err.name;
+      if (n === "AbortError") return;           // המשתמש סגר את חלון השיתוף
+      if (n === "NotAllowedError") say(M.blocked);
+      else say(M.error + (n ? " (" + n + ")" : ""));
+    });
+  }, true);
+})();
+</script>
+"""
+
+
+def share_button(pdf_bytes, filename):
+    """כפתור שיתוף לקובץ בזיכרון. הקובץ נשלח לדפדפן פעם אחת בלבד בכל סשן;
+    בריצות הבאות נשלח רק המזהה (חוסך מגה-בייטים בכל שינוי בתיבת בחירה)."""
+    key = hashlib.md5(pdf_bytes + filename.encode("utf-8")).hexdigest()
+    sent = st.session_state.setdefault("ss_sent", set())
+    rec = None
+    if key not in sent:
+        rec = {"key": key, "name": filename,
+               "b64": base64.b64encode(pdf_bytes).decode("ascii")}
+        sent.add(key)
+    msgs = {"unsupported": T["share_unsupported"], "blocked": T["share_blocked"],
+            "error": T["share_error"], "missing": T["share_missing"]}
+    js = (_SHARE_JS.replace("__REC__", json.dumps(rec))
+                   .replace("__MSGS__", json.dumps(msgs, ensure_ascii=False)))
+    button = (f'<div><button type="button" class="ss-share" data-file-key="{key}" '
+              f'title="{html.escape(T["share_tooltip"])}">📤 {html.escape(T["share"])}</button>'
+              f'<div class="ss-share-msg"></div></div>')
+    st.html(_SHARE_CSS + button + js, unsafe_allow_javascript=True)
+
+
+# ---------------------------------------------------------------------------
+# זרימה ראשית / Main flow
+# ---------------------------------------------------------------------------
 if uploaded_file is not None:
+    file_bytes = uploaded_file.getvalue()
+    file_hash = hashlib.md5(file_bytes).hexdigest()
+    anchor_key = hashlib.md5(anchor_field.encode("utf-8")).hexdigest()[:8]
+
     # חילוץ תאריך משם הקובץ המקורי (למשל 5.26)
-    pattern = r'\b(\d+\.\d+)\b'
-    match = re.search(pattern, uploaded_file.name)
+    match = re.search(r'\b(\d+\.\d+)\b', uploaded_file.name)
     date_prefix = f"{match.group(1)} " if match else ""
 
-    # טעינת ה-PDF ל-Session State כדי למנוע טעינה מחדש בכל קליק
-    if 'pdf_reader' not in st.session_state or st.session_state.get('file_name') != uploaded_file.name:
-        st.session_state['pdf_reader'] = PdfReader(uploaded_file)
-        st.session_state['file_name'] = uploaded_file.name
-        st.session_state['chosen_names'] = {}
-
-    reader = st.session_state['pdf_reader']
-    total_pages = len(reader.pages)
+    with st.spinner(T["analyzing"]):
+        analysis = analyze_pdf(file_hash, anchor_field, file_bytes)
 
     st.subheader(T["confirm_subheader"])
     st.write(T["confirm_help"])
 
-    # ריצה על עמודי ה-PDF — רשימה שטוחה ונוחה למובייל (ללא expander)
-    for page_num in range(total_pages):
-        guessed_name, page_lines = analyze_page(reader.pages[page_num], anchor_field)
-
-        # בניית רשימת האפשרויות: הניחוש החכם ראשון (ברירת מחדל),
-        # ואחריו כל השורות שחולצו מהעמוד לתיקון ידני במידת הצורך.
+    # מעבר 1: תיבות בחירה. העמודות נשמרות כדי למלא בהן כפתורים אחרי שכל
+    # השמות ידועים (צריך לדעת מראש אילו עמודים מתאחדים).
+    rows = []
+    filenames = []
+    for page_num, (guessed_name, page_lines) in enumerate(analysis):
         options = []
         if guessed_name:
             options.append(guessed_name)
-        options.extend(line for line in page_lines if line != guessed_name)
+        options.extend(line for line in dict.fromkeys(page_lines) if line != guessed_name)
         if not options:
             options = [f"page_{page_num + 1}"]
 
-        # שורה שטוחה: תיבת בחירה (רחבה) + כפתור הורדה (צר)
-        col_select, col_btn = st.columns([3, 1])
-
+        col_select, col_dl, col_share = st.columns([3, 1, 1])
         with col_select:
-            chosen_line = st.selectbox(
+            chosen = st.selectbox(
                 T["select_label"].format(n=page_num + 1),
                 options=options,
                 index=0,
-                key=f"page_select_{page_num}"
+                accept_new_options=True,  # הקלדת שם חופשי
+                # המפתח כולל את hash הקובץ: קובץ חדש (גם עם אותו שם) מתחיל מאפס
+                key=f"sel_{file_hash}_{anchor_key}_{page_num}",
             )
+        rows.append((col_dl, col_share))
+        filenames.append(f"{date_prefix}{sanitize_name(chosen, page_num)}.pdf")
 
-        # שמירת השם שנבחר (בין אם הוא האוטומטי ובין אם המשתמש שינה)
-        st.session_state['chosen_names'][page_num] = chosen_line
+    # קיבוץ עמודים עם אותו שם קובץ -> PDF אחד מרובה עמודים
+    groups = {}
+    for page_num, fname in enumerate(filenames):
+        groups.setdefault(fname, []).append(page_num)
 
-        # כפתור הורדה בודד: יוצר PDF של העמוד הזה בלבד בזיכרון
-        single_clean = sanitize_name(chosen_line, page_num)
-        single_filename = f"{date_prefix}{single_clean}.pdf"
-        with col_btn:
+    # מעבר 2: כפתורי הורדה/שיתוף בשורה של העמוד הראשון בכל קבוצה
+    for page_num, fname in enumerate(filenames):
+        pages = groups[fname]
+        col_dl, col_share = rows[page_num]
+        if page_num != pages[0]:
+            with col_dl:
+                st.caption(T["merged_with"].format(n=pages[0] + 1))
+            continue
+        pdf_bytes = build_pdf(file_hash, tuple(pages), file_bytes)
+        with col_dl:
             st.download_button(
                 label=T["download_single"],
-                data=build_page_pdf(reader.pages[page_num]),
-                file_name=single_filename,
+                data=pdf_bytes,
+                file_name=fname,
                 mime="application/pdf",
-                key=f"page_download_{page_num}"
+                key=f"dl_{file_hash}_{page_num}",
+                width="stretch",
             )
+            if len(pages) > 1:
+                st.caption(T["merged_pages"].format(pages=", ".join(str(p + 1) for p in pages)))
+        with col_share:
+            share_button(pdf_bytes, fname)
 
     st.write("---")
     st.subheader(T["final_subheader"])
 
     if st.button(T["zip_button"]):
-        zip_buffer = io.BytesIO()
-        used_names = {}
-
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for page_num in range(total_pages):
-                page = reader.pages[page_num]
-
-                # שליפת השם הסופי (אוטומטי או ידני)
-                selected_name = st.session_state['chosen_names'].get(page_num, f"page_{page_num + 1}")
-
-                # ניקוי תווים לא חוקיים לשמירה במערכת ההפעלה
-                clean_name = sanitize_name(selected_name, page_num)
-
-                output_filename = f"{date_prefix}{clean_name}.pdf"
-
-                # מניעת דריסה של קבצים כשיש שם זהה לשני עמודים
-                count = used_names.get(output_filename, 0)
-                used_names[output_filename] = count + 1
-                if count > 0:
-                    output_filename = f"{date_prefix}{clean_name} ({count}).pdf"
-
-                # הזרקה ישירה לתוך ה-ZIP בזיכרון
-                zip_file.writestr(output_filename, build_page_pdf(page))
-
+        zip_groups = tuple((fname, tuple(pages)) for fname, pages in groups.items())
+        zip_bytes = build_zip(file_hash, zip_groups, file_bytes)
         st.success(T["zip_ready"])
-
         st.download_button(
             label=T["zip_download"],
-            data=zip_buffer.getvalue(),
+            data=zip_bytes,
             file_name="split_payroll_slips.zip",
-            mime="application/zip"
+            mime="application/zip",
         )
